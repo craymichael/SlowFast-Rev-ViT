@@ -558,7 +558,7 @@ class ReversibleBlock(nn.Module):
         """
 
         # temporarily record intermediate activation for G
-        # and use them for gradient calculcation of G
+        # and use them for gradient calculation of G
         with torch.enable_grad():
 
             Y_1.requires_grad = True
