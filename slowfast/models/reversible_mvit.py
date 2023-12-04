@@ -179,6 +179,60 @@ class ReversibleMViT(nn.Module):
 
         return x
 
+    def inverse(self, x):
+        assert not self.training
+
+        # process the layers in a reversible stack and an irreversible stack.
+        stack = []
+        for l_i in range(len(self.layers)):
+            if isinstance(self.layers[l_i], StageTransitionBlock):
+                raise NotImplementedError('StageTransitionBlock')
+                # stack.append(("StageTransition", l_i))
+            else:
+                if len(stack) == 0 or stack[-1][0] == "StageTransition":
+                    stack.append(("Reversible", []))
+                stack[-1][1].append(l_i)
+
+        # # Apply dropout (no training enabled so commented this for now)
+        # x = nn.functional.dropout(x, p=self.dropout,
+        #                           training=self.training)
+
+        for layer_seq in stack[::-1]:  # reverse way through the stack
+            # get input
+            x = self._invert_layers(
+                x,  # prev. output
+                self.layers[layer_seq[1][0]: layer_seq[1][-1] + 1],
+            )
+
+            # Invert cat
+            # if layer_seq[0] == "StageTransition":  # not implemented see above
+            #     x = self.layers[layer_seq[1]](x)
+            #
+            # else:
+
+            # x = torch.cat([x, x], dim=-1)
+            x, x_ = torch.chunk(x, 2, dim=-1)
+            # for atol in [1e-8, 1e-7, 1e-6, 1e-5, 1e-4]:
+            #     for rtol in [1e-5, 1e-4, 1e-3, 1e-2]:
+            #         print(atol, rtol, torch.allclose(x, x_, atol=atol, rtol=rtol))
+            # assert torch.allclose(x, x_), (x, x_)  # BIST
+
+        return x
+
+    @staticmethod
+    def _invert_layers(x, layers):
+        X_1, X_2 = torch.chunk(x, 2, dim=-1)
+
+        for _, layer in enumerate(layers[::-1]):
+
+            X_1, X_2 = layer.inverse(
+                Y_1=X_1,
+                Y_2=X_2,
+            )
+
+        x = torch.cat([X_1, X_2], dim=-1)
+        return x
+
 
 class RevBackProp(Function):
     """
@@ -228,7 +282,7 @@ class RevBackProp(Function):
     def backward(ctx, dx):
         """
         Reversible Backward pass. Any intermediate activations from `buffer_layers` are
-        recovered from ctx. Each layer implements its own loic for backward pass (both
+        recovered from ctx. Each layer implements its own logic for backward pass (both
         activation recomputation and grad calculation).
         """
         dX_1, dX_2 = torch.chunk(dx, 2, dim=-1)
@@ -610,6 +664,42 @@ class ReversibleBlock(nn.Module):
             X_2 = X_2.detach()
 
         return X_1, X_2, dY_1, dY_2
+
+    def inverse(self, Y_1, Y_2):
+        """
+        equation for activation recomputation:
+        X_2 = Y_2 - G(Y_1), G = MLP
+        X_1 = Y_1 - F(X_2), F = Attention
+        """
+
+        # temporarily record intermediate activation for G
+        # and use them for gradient calculation of G
+        torch.manual_seed(self.seeds["FFN"])
+        g_Y_1 = self.G(Y_1)
+
+        torch.manual_seed(self.seeds["droppath"])
+        g_Y_1 = drop_path(
+            g_Y_1, drop_prob=self.drop_path_rate, training=self.training
+        )
+
+        # activation recomputation is by design and not part of
+        # the computation graph in forward pass.
+        X_2 = Y_2 - g_Y_1
+
+        # record F activations
+        torch.manual_seed(self.seeds["attn"])
+        f_X_2 = self.F(X_2)
+
+        torch.manual_seed(self.seeds["droppath"])
+        f_X_2 = drop_path(
+            f_X_2, drop_prob=self.drop_path_rate, training=self.training
+        )
+
+        # propagate reverse computed activations at the start of
+        # the previous block for backprop.
+        X_1 = Y_1 - f_X_2
+
+        return X_1, X_2
 
 
 class MLPSubblock(nn.Module):

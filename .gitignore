@@ -1,0 +1,5 @@
+*.pyc
+.idea/
+detectron2_repo/
+__pycache__/
+*.pyth
